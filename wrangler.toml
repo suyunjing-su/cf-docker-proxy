@@ -1,4 +1,4 @@
-name = "cloudflare-docker-proxy"
+name = "cfdp"
 compatibility_date = "2023-12-01"
 
 [dev]
@@ -12,9 +12,10 @@ CUSTOM_DOMAIN = "libcuda.so"
 [env.dev.vars]
 MODE = "debug"
 TARGET_UPSTREAM = "https://registry-1.docker.io"
+CUSTOM_DOMAIN = "exmaple.com"
 
 [env.production]
-name = "cloudflare-docker-proxy"
+name = "cfdp"
 # routes = [
 #   { pattern = "docker.libcuda.so", custom_domain = true },
 #   { pattern = "quay.libcuda.so", custom_domain = true },
@@ -30,7 +31,7 @@ MODE = "production"
 TARGET_UPSTREAM = ""
 
 [env.staging]
-name = "cloudflare-docker-proxy-staging"
+name = "cfdp"
 # route = { pattern = "docker-staging.libcuda.so", custom_domain = true }
 
 [env.staging.vars]
