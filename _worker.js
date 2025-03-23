@@ -1,64 +1,56 @@
-export async function fetch(request, env, ctx) {
-    // 将环境变量赋值给全局变量，保持代码原有的逻辑
-    globalThis.CUSTOM_DOMAIN = env.CUSTOM_DOMAIN;
-    globalThis.MODE = env.MODE || "stable";
-    globalThis.TARGET_UPSTREAM = env.TARGET_UPSTREAM || "https://registry-1.docker.io";
-    try {
-      return await handleRequest(request);
-    } catch (e) {
-      return new Response(e.stack || e.toString(), { status: 500 });
-    }
-  }
+export default {
+    async fetch(request, env, ctx) {
+      // 重新定义 routes，确保 env.CUSTOM_DOMAIN 可用
+      const dockerHub = "https://registry-1.docker.io";
+      const CUSTOM_DOMAIN = env.CUSTOM_DOMAIN || "";
+      const MODE = env.MODE || "";
+      const TARGET_UPSTREAM = env.TARGET_UPSTREAM || "";
   
-  const dockerHub = "https://registry-1.docker.io";
+      const routes = {
+        [`docker.${CUSTOM_DOMAIN}`]: dockerHub,
+        [`quay.${CUSTOM_DOMAIN}`]: "https://quay.io",
+        [`gcr.${CUSTOM_DOMAIN}`]: "https://gcr.io",
+        [`k8s-gcr.${CUSTOM_DOMAIN}`]: "https://k8s.gcr.io",
+        [`k8s.${CUSTOM_DOMAIN}`]: "https://registry.k8s.io",
+        [`ghcr.${CUSTOM_DOMAIN}`]: "https://ghcr.io",
+        [`cloudsmith.${CUSTOM_DOMAIN}`]: "https://docker.cloudsmith.io",
+        [`ecr.${CUSTOM_DOMAIN}`]: "https://public.ecr.aws",
   
-  const routes = {
-    // production
-    ["docker." + CUSTOM_DOMAIN]: dockerHub,
-    ["quay." + CUSTOM_DOMAIN]: "https://quay.io",
-    ["gcr." + CUSTOM_DOMAIN]: "https://gcr.io",
-    ["k8s-gcr." + CUSTOM_DOMAIN]: "https://k8s.gcr.io",
-    ["k8s." + CUSTOM_DOMAIN]: "https://registry.k8s.io",
-    ["ghcr." + CUSTOM_DOMAIN]: "https://ghcr.io",
-    ["cloudsmith." + CUSTOM_DOMAIN]: "https://docker.cloudsmith.io",
-    ["ecr." + CUSTOM_DOMAIN]: "https://public.ecr.aws",
+        // staging
+        [`docker-staging.${CUSTOM_DOMAIN}`]: dockerHub,
+      };
   
-    // staging
-    ["docker-staging." + CUSTOM_DOMAIN]: dockerHub,
+      function routeByHosts(host) {
+        if (host in routes) {
+          return routes[host];
+        }
+        if (MODE === "debug") {
+          return TARGET_UPSTREAM;
+        }
+        return "";
+      }
+  
+      return await handleRequest(request, routeByHosts);
+    },
   };
   
-  function routeByHosts(host) {
-    if (host in routes) {
-      return routes[host];
-    }
-    if (MODE == "debug") {
-      return TARGET_UPSTREAM;
-    }
-    return "";
-  }
-  
-  async function handleRequest(request) {
+  async function handleRequest(request, routeByHosts) {
     const url = new URL(request.url);
     const upstream = routeByHosts(url.hostname);
     if (upstream === "") {
-      return new Response(
-        JSON.stringify({
-          routes: routes,
-        }),
-        {
-          status: 404,
-        }
-      );
+      return new Response(JSON.stringify({ message: "Not Found", routes: routeByHosts }), {
+        status: 404,
+      });
     }
-    const isDockerHub = upstream == dockerHub;
+    const isDockerHub = upstream === "https://registry-1.docker.io";
     const authorization = request.headers.get("Authorization");
-    if (url.pathname == "/v2/") {
+  
+    if (url.pathname === "/v2/") {
       const newUrl = new URL(upstream + "/v2/");
       const headers = new Headers();
       if (authorization) {
         headers.set("Authorization", authorization);
       }
-      // check if need to authenticate
       const resp = await fetch(newUrl.toString(), {
         method: "GET",
         headers: headers,
@@ -69,80 +61,63 @@ export async function fetch(request, env, ctx) {
       }
       return resp;
     }
-    // get token
-    if (url.pathname == "/v2/auth") {
+  
+    if (url.pathname === "/v2/auth") {
       const newUrl = new URL(upstream + "/v2/");
-      const resp = await fetch(newUrl.toString(), {
-        method: "GET",
-        redirect: "follow",
-      });
-      if (resp.status !== 401) {
-        return resp;
-      }
+      const resp = await fetch(newUrl.toString(), { method: "GET", redirect: "follow" });
+      if (resp.status !== 401) return resp;
+  
       const authenticateStr = resp.headers.get("WWW-Authenticate");
-      if (authenticateStr === null) {
-        return resp;
-      }
+      if (!authenticateStr) return resp;
+  
       const wwwAuthenticate = parseAuthenticate(authenticateStr);
       let scope = url.searchParams.get("scope");
-      // autocomplete repo part into scope for DockerHub library images
-      // Example: repository:busybox:pull => repository:library/busybox:pull
       if (scope && isDockerHub) {
         let scopeParts = scope.split(":");
-        if (scopeParts.length == 3 && !scopeParts[1].includes("/")) {
+        if (scopeParts.length === 3 && !scopeParts[1].includes("/")) {
           scopeParts[1] = "library/" + scopeParts[1];
           scope = scopeParts.join(":");
         }
       }
       return await fetchToken(wwwAuthenticate, scope, authorization);
     }
-    // redirect for DockerHub library images
-    // Example: /v2/busybox/manifests/latest => /v2/library/busybox/manifests/latest
+  
     if (isDockerHub) {
       const pathParts = url.pathname.split("/");
-      if (pathParts.length == 5) {
+      if (pathParts.length === 5) {
         pathParts.splice(2, 0, "library");
         const redirectUrl = new URL(url);
         redirectUrl.pathname = pathParts.join("/");
         return Response.redirect(redirectUrl, 301);
       }
     }
-    // forward requests
+  
     const newUrl = new URL(upstream + url.pathname);
     const newReq = new Request(newUrl, {
       method: request.method,
       headers: request.headers,
-      // don't follow redirect to dockerhub blob upstream
       redirect: isDockerHub ? "manual" : "follow",
     });
     const resp = await fetch(newReq);
-    if (resp.status == 401) {
+    if (resp.status === 401) {
       return responseUnauthorized(url);
     }
-    // handle dockerhub blob redirect manually
-    if (isDockerHub && resp.status == 307) {
+  
+    if (isDockerHub && resp.status === 307) {
       const location = new URL(resp.headers.get("Location"));
-      const redirectResp = await fetch(location.toString(), {
-        method: "GET",
-        redirect: "follow",
-      });
-      return redirectResp;
+      return await fetch(location.toString(), { method: "GET", redirect: "follow" });
     }
+  
     return resp;
   }
   
   function parseAuthenticate(authenticateStr) {
-    // sample: Bearer realm="https://auth.ipv6.docker.com/token",service="registry.docker.io"
-    // match strings after =" and before "
     const re = /(?<=\=")(?:\\.|[^"\\])*(?=")/g;
     const matches = authenticateStr.match(re);
-    if (matches == null || matches.length < 2) {
-      throw new Error(`invalid Www-Authenticate Header: ${authenticateStr}`);
+    if (!matches || matches.length < 2) {
+      throw new Error(`Invalid Www-Authenticate Header: ${authenticateStr}`);
     }
-    return {
-      realm: matches[0],
-      service: matches[1],
-    };
+    return { realm: matches[0], service: matches[1] };
   }
   
   async function fetchToken(wwwAuthenticate, scope, authorization) {
@@ -162,20 +137,10 @@ export async function fetch(request, env, ctx) {
   
   function responseUnauthorized(url) {
     const headers = new Headers();
-    if (MODE == "debug") {
-      headers.set(
-        "Www-Authenticate",
-        `Bearer realm="http://${url.host}/v2/auth",service="cloudflare-docker-proxy"`
-      );
-    } else {
-      headers.set(
-        "Www-Authenticate",
-        `Bearer realm="https://${url.hostname}/v2/auth",service="cloudflare-docker-proxy"`
-      );
-    }
-    return new Response(JSON.stringify({ message: "UNAUTHORIZED" }), {
-      status: 401,
-      headers: headers,
-    });
+    headers.set(
+      "Www-Authenticate",
+      `Bearer realm="https://${url.hostname}/v2/auth",service="cloudflare-docker-proxy"`
+    );
+    return new Response(JSON.stringify({ message: "UNAUTHORIZED" }), { status: 401, headers: headers });
   }
   
